@@ -2,56 +2,54 @@ import { test, expect } from '@playwright/test';
 import { runBrowserTask } from '../src/browser-agent.mjs';
 import { contactForms } from '../scenarios/contact-forms.mjs';
 
-// A URL override runs one test using the first scenario's data and assertions.
+// Either override runs one scenario, reusing the first scenario's other settings.
 const targetURL = process.env.TEST_URL?.trim();
-const scenarios = targetURL
-  ? [{ ...contactForms[0], name: 'Custom URL: ' + targetURL, url: targetURL }]
+const prompt = process.env.TEST_PROMPT?.trim();
+const scenarios = targetURL || prompt
+  ? [{ ...contactForms[0], name: 'Custom scenario',
+    url: targetURL || contactForms[0].url,
+    prompt: prompt || contactForms[0].prompt }]
   : contactForms;
 
 for (const scenario of scenarios) {
   test.describe(scenario.name, () => {
     // Check availability before starting Chromium or making an OpenAI call.
     test.beforeAll(async ({ request }) => {
+      expect(scenario.prompt?.trim(), 'A scenario needs a non-empty prompt.').toBeTruthy();
       const response = await request.get(scenario.url, { timeout: 20_000 });
       expect(response.ok(),
-        'Demo page returned HTTP ' + response.status() + ': ' + scenario.url +
-        '. Publish the page or update scenarios/contact-forms.mjs.',
+        'Page returned HTTP ' + response.status() + ': ' + scenario.url +
+        '. Publish the page or update TEST_URL / scenarios/contact-forms.mjs.',
       ).toBeTruthy();
     });
 
-    test('agent fills and submits the contact form', async ({ page }, testInfo) => {
-      // Navigation is test setup; the agent receives the page as a screenshot.
+    test('agent follows the form prompt', async ({ page }, testInfo) => {
+      await testInfo.attach('scenario', {
+        body: JSON.stringify({ url: scenario.url, prompt: scenario.prompt }, null, 2),
+        contentType: 'application/json',
+      });
       await page.goto(scenario.url);
-      const filled = await runBrowserTask(page,
-        'The page at ' + scenario.url + ' is open. Fill the contact form with these details: ' +
-        JSON.stringify(scenario.fields) + '. Leave the form filled. Do not submit yet.',
-      );
-      await testInfo.attach('fill-history', {
-        body: JSON.stringify(filled.history, null, 2),
+      const result = await runBrowserTask(page, scenario.prompt);
+      await testInfo.attach('agent-history', {
+        body: JSON.stringify(result.history, null, 2),
         contentType: 'application/json',
       });
-
-      // Check the actual inputs before submission can clear or hide them.
-      await expect(page).toHaveURL(scenario.url);
-      for (const [name, value] of Object.entries(scenario.fields)) {
-        await expect(page.getByRole('textbox', { name, exact: true })).toHaveValue(value);
-      }
-      await expect(page.getByRole('status')).not.toHaveText(scenario.successText);
-
-      const submitted = await runBrowserTask(page,
-        'Use the contact form on the page that is already open. Do not navigate or ' +
-        'change any fields. Submit this pretend inquiry exactly once and wait for ' +
-        'the on-page confirmation.',
-      );
-      await testInfo.attach('submit-history', {
-        body: JSON.stringify(submitted.history, null, 2),
-        contentType: 'application/json',
+      await testInfo.attach('final-page', {
+        body: await page.screenshot({ type: 'png', fullPage: true }),
+        contentType: 'image/png',
       });
-      console.log('Agent:', submitted.finalOutput);
+      console.log('Agent:', result.finalOutput);
+      console.log('Review artifacts:', testInfo.outputDir);
 
-      // The agent saying it succeeded is not enough; the page must confirm it.
-      await expect(page.getByRole('status')).toBeVisible();
-      await expect(page.getByRole('status')).toHaveText(scenario.successText);
+      // Execution checks only. Review the screenshot/transcript for task correctness.
+      expect(result.interruptions, 'The agent run paused before finishing.').toHaveLength(0);
+      expect(result.finalOutput, 'The agent did not return a final response.').toBeTruthy();
+      const actions = result.rawResponses.flatMap((response) => response.output)
+        .filter((item) => item.type === 'computer_call')
+        .flatMap((call) => call.actions ?? [call.action]);
+      expect(actions.some((action) => ['click', 'double_click', 'type', 'keypress', 'drag'].includes(action?.type)),
+        'The agent finished without interacting with the form.',
+      ).toBe(true);
     });
   });
 }

@@ -1,122 +1,105 @@
-# Computer-use form tests
+# Computer-use form scenarios
 
-Small tests for live demo contact pages using the [OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents),
-its built-in computer-use and web-search tools, and Playwright. Plain JavaScript, three dependencies, no build step or local web server.
+Give the agent a URL and a plain-English prompt. It reads screenshots, determines
+which fields correspond to your request, and fills the page using computer use.
+The agent uses the [OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents)
+with exactly two built-in tools: `web_search` and `computer`.
 
-## Configure your pages
+## Run with your own prompt
 
-Edit **scenarios/contact-forms.mjs**. Each entry defines a test name, a full live
-URL, the exact accessible labels and values of its form fields, and the expected
-confirmation text. Add another entry for each CPA firm's demo page.
+```sh
+TEST_URL='https://augmenticaccounting.com/webmcp-contact-me/johnsoncpa/' \
+TEST_PROMPT='Fill out the contact form. I am Alex Taylor, alex.taylor@example.com, and I want help with bookkeeping. Do not submit.' \
+npm test
+```
 
-The first scenario targets:
+The prompt defines the task and supplies the information to use. The agent figures
+out the fields from the page. If you want it to submit, explicitly say so in the
+prompt. Otherwise, it leaves the filled form for review. These scenarios are
+intended for your pretend forms, whose submit handlers do not send real emails.
 
-https://augmenticaccounting.com/webmcp-contact-me/johnsoncpa/
+Either `TEST_URL` or `TEST_PROMPT` selects a single run; an omitted value comes
+from the first saved scenario. Without either override, all saved scenarios run.
 
-This page is for you to create and publish. The test does not create or host it.
-Until it exists, the test will fail with a clear HTTP-status error before launching
-a browser or making an OpenAI call.
+## Saved scenarios
 
-For the initial scenario, build the page with this contract:
+Edit `scenarios/contact-forms.mjs`. Each entry contains a name, a URL, and a prompt:
 
-| Control | Requirement |
-| --- | --- |
-| Name | A text input labeled `Name`. |
-| Email | An email input labeled `Email`. |
-| Message | A textarea labeled `Message`. |
-| Submit | A named submit button, such as `Send message`. |
-| Confirmation | A visible element with `role="status"` displaying `Thanks! Your message has been received.` after submission. |
+```js
+{
+  name: 'Johnson CPA',
+  url: 'https://augmenticaccounting.com/webmcp-contact-me/johnsoncpa/',
+  prompt: 'Fill out the form for Alex Taylor, alex.taylor@example.com. Ask about bookkeeping services. Do not submit.',
+}
+```
 
-Use visible HTML labels so the agent can read the fields in screenshots and
-the test can independently check their values. Match the labels and
-confirmation in the scenario if you choose different wording. The pretend submit
-handler should show its confirmation in the browser without sending real emails.
-It may clear or hide the form afterward. Start with a single contact form per page.
+There are no field maps, required labels, expected confirmation strings, or
+separate fill/submit stages. The agent receives the prompt as written, along
+with an initial screenshot of the open page.
 
-## Run it
+You create and publish the live pages. Use visible labels to help the agent
+understand them. An unavailable URL produces a clear HTTP-status error before
+Chromium starts or an OpenAI call is made.
 
-Requires Node.js **22.9+** and an OpenAI API key with API billing enabled.
+## Setup
+
+Requires Node.js **22.9+**, Chromium, and an OpenAI API key with API billing enabled.
 
 ```sh
 npm ci
 npm run browser:install
 test -f .env || cp .env.example .env
-# Add OPENAI_API_KEY to .env. Keep an existing .env if you already configured it.
+# Add OPENAI_API_KEY to .env.
 npm test
 ```
 
 On Linux, install Chromium's system libraries with
 `npx playwright install-deps chromium` if needed; this may ask for your sudo password.
-Chromium runs headlessly, so a VPS does not need a desktop or display.
+The browser is headless by default, so a VPS does not need a desktop or display.
 
-`npm test` loads `.env` automatically; existing shell variables take precedence.
-`OPENAI_MODEL` defaults to `gpt-5.4-mini`, which supports both computer use and
-web search. If you still have `gpt-4.1-mini` in an existing `.env`, change it to
-`gpt-5.4-mini`; the earlier model cannot perform computer use. Live agent runs
-make billable API calls, including image tokens for screenshots.
-
-Run a single URL with the first scenario's contact data and expected confirmation:
+`npm test` loads `.env`; existing shell variables take precedence.
+`OPENAI_MODEL` defaults to `gpt-5.4-mini`. Choose a model supporting computer
+use, such as that model or `gpt-6-astra`. The earlier `gpt-4.1-mini` default
+does not support computer use. Live runs incur API charges, including screenshot
+image tokens.
 
 ```sh
-TEST_URL="https://augmenticaccounting.com/webmcp-contact-me/johnsoncpa/" npm test
+npm test -- --grep 'Johnson CPA'  # Run one saved scenario
+npm test -- --headed             # Watch on a machine with a desktop
+npm run test:smoke                # Offline check; no API key or live website needed
 ```
 
-Without `TEST_URL`, all entries in `scenarios/contact-forms.mjs` run.
+## Results
 
-```sh
-npm test -- --grep "Johnson CPA"  # Run one configured page
-npm test -- --headed             # Watch the browser on a machine with a desktop
-npm run test:smoke                # No API calls or live website required
-```
+The runner opens the URL, gives the prompt and screenshot to the agent, and lets
+the SDK execute its computer actions. It prints the agent's final response and
+saves the prompt, conversation history, and final screenshot under `test-results/`.
+Failed tests also retain a Playwright trace.
 
-## How it works
+**A passing scenario is an execution check, not a grade of form correctness.**
+It checks that the agent finished, returned a response, and requested form
+interaction. Review the screenshot and transcript to judge whether it filled the
+page correctly. Prompt-only scenarios have no fixed field-by-field assertions;
+partial completion may still require your review.
 
-1. Check that the configured URL responds successfully.
-2. Open the URL in Chromium and give the agent a screenshot. Ask it to fill
-   the form using computer use without submitting.
-3. Assert that every configured field contains the correct value and that the
-   success message has not already appeared.
-4. Ask the agent to submit the filled form once, using the same browser page.
-5. Assert that the expected confirmation is visible.
+The agent can take at most 20 model turns and runs for at most 180 seconds. The
+test timeout is 240 seconds, with one worker and no test retries. SDK cloud trace
+export is disabled; local artifacts and credentials are git-ignored.
 
-The agent has exactly two built-in tools:
-
-| Tool | Purpose |
-| --- | --- |
-| `web_search` | Find/read public web information when needed. It does not operate the browser. |
-| `computer` | Read screenshots and issue mouse, keyboard, scrolling, and other computer actions. |
-
-There are no custom DOM tools. The SDK routes computer actions to a small
-Playwright adapter and returns fresh screenshots to the model. Playwright's
-selectors are used only by the test's independent assertions. The test sets up
-the initial URL because the headless page has no browser address bar.
-
-Each stage starts with a screenshot, allows at most 20 model turns, and aborts
-after 180 seconds. The test timeout is 390 seconds, with one worker and no test
-retries. The model's final answer does not determine success. The pages do not
-need MCP or WebMCP support.
-
-See the official [computer-use guide](https://developers.openai.com/api/docs/guides/tools-computer-use)
-and [GPT-5.4 mini capabilities](https://developers.openai.com/api/docs/models/gpt-5.4-mini).
-
-## Files and debugging
+## Files
 
 | File | Purpose |
 | --- | --- |
-| `scenarios/contact-forms.mjs` | Your live URLs, contact data, and expected confirmations. |
-| `tests/agent.spec.mjs` | Runs the two stages and verifies the actual page state. |
-| `src/browser-agent.mjs` | Agent with web search and computer use; bounded SDK run. |
-| `src/playwright-computer.mjs` | Translates computer actions into mouse/keyboard input and screenshots. |
-| `tests/smoke.spec.mjs` | Scripted computer calls against an intercepted page; real SDK, screenshots, and Chromium. |
+| `scenarios/contact-forms.mjs` | Saved URLs and plain-English prompts. |
+| `tests/agent.spec.mjs` | Runs the prompt and saves results for review. |
+| `src/browser-agent.mjs` | Agent with web search and computer use. |
+| `src/playwright-computer.mjs` | Executes mouse/keyboard actions and captures screenshots. |
+| `tests/smoke.spec.mjs` | Tests the SDK and computer adapter against an intercepted fake form. |
 | `playwright.config.mjs` | Browser settings, timeouts, and failure artifacts. |
 
-The local to-do demo and its server have been removed. Only the offline smoke
-test supplies a tiny contact form via network interception to check the tools.
-It verifies coordinate clicks, typing, keyboard shortcuts, screenshot results,
-and form submission. It does not verify the live model or your deployed pages.
+Web search can find public information; it does not operate the browser. The
+computer tool reads screenshots and sends mouse/keyboard actions. There are no
+custom DOM tools or model-facing selectors. The pages need no MCP or WebMCP support.
 
-Tool actions print in the terminal. Each completed agent stage attaches its
-conversation history. Failed tests save a screenshot (when a page exists) and a
-Playwright trace under `test-results/`. Open a trace on a machine with a desktop
-using `npx playwright show-trace <path-to-trace.zip>`. SDK cloud trace export is
-disabled. Credentials, dependencies, and test artifacts are git-ignored.
+The offline smoke test still checks exact values on its own tiny fixture to
+verify the computer adapter. Those checks do not constrain your live scenarios.

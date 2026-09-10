@@ -2,8 +2,8 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests',
-  // Each of the two agent stages has its own 180-second limit.
-  timeout: 390_000,
+  // One agent run has a 180-second limit, plus navigation and artifact capture.
+  timeout: 240_000,
   workers: 1,
   retries: 0,
   reporter: 'list',

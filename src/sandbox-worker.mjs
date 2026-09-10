@@ -26,10 +26,20 @@ function display(value) {
   emit({ type: 'image', image: 'data:image/png;base64,' + base64, detail: 'original' });
 }
 
+async function observation(error, label, includeScreenshot = true) {
+  if (outputBytes > maxOutputBytes - 4 * 1024 * 1024) { output = []; outputBytes = 0; }
+  if (includeScreenshot) display(await page.screenshot({ type: 'png', scale: 'css' }));
+  if (error) emit({ type: 'text', text: label + ': ' + error });
+  if (!output.length) emit({ type: 'text', text: 'Action completed.' });
+  return { output, error };
+}
+
 async function handle(message) {
   switch (message.method) {
     case 'init': {
-      browser = await chromium.launch({ headless: true, env: {} });
+      browser = await chromium.launch({
+        headless: true, env: {}, args: ['--enable-features=WebMCPTesting'],
+      });
       context = await browser.newContext({
         viewport: message.viewport, deviceScaleFactor: 1, acceptDownloads: false,
         serviceWorkers: 'block',
@@ -56,6 +66,42 @@ async function handle(message) {
       await page.goto(message.url);
       return true;
     }
+    case 'webmcp_discover':
+      return page.evaluate(async () => {
+        const native = document.modelContext || navigator.modelContext;
+        const available = typeof native?.getTools === 'function' && typeof native?.executeTool === 'function';
+        const info = { url: location.href, nativeAvailable: available, tools: [] };
+        // Some sites keep unrelated tools registered even with their form tools off.
+        if (new URL(location.href).searchParams.get('webmcp') === 'off') return { ...info, status: 'disabled' };
+        if (!available) return { ...info, status: 'unavailable' };
+        const tools = (await native.getTools()).filter(tool => tool.window === window).map(tool => ({
+          name: tool.name, description: tool.description, origin: tool.origin,
+          inputSchema: typeof tool.inputSchema === 'string' ? JSON.parse(tool.inputSchema) : tool.inputSchema,
+        }));
+        return { ...info, status: tools.length ? 'ready' : 'no-tools', tools };
+      });
+    case 'webmcp_call': {
+      output = [];
+      outputBytes = 0;
+      let error;
+      try {
+        const result = await page.evaluate(async ({ url, name, origin, input }) => {
+          if (location.href !== url) throw new Error('The page changed; this WebMCP tool belongs to the original page.');
+          if (new URL(location.href).searchParams.get('webmcp') === 'off') throw new Error('WebMCP is disabled for this URL.');
+          const native = document.modelContext || navigator.modelContext;
+          if (!native?.getTools || !native?.executeTool) throw new Error('Native WebMCP is unavailable.');
+          const tool = (await native.getTools()).find(tool => tool.window === window && tool.name === name && tool.origin === origin);
+          if (!tool) throw new Error('WebMCP tool is no longer registered: ' + name);
+          // Playwright 1.63's Chromium accepts a RegisteredTool and JSON text.
+          // Do not retry a failed invocation: a page action may already have occurred.
+          return native.executeTool(tool, JSON.stringify(input));
+        }, message);
+        emit({ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result ?? null) });
+      } catch (failure) {
+        error = String(failure.message ?? failure).slice(0, 4_000);
+      }
+      return observation(error, 'WebMCP error', message.includeScreenshot);
+    }
     case 'execute': {
       if (typeof message.code !== 'string' || !message.code.trim() || message.code.length > 50_000) {
         throw new Error('Provide 1–50,000 characters of JavaScript.');
@@ -71,12 +117,13 @@ async function handle(message) {
       } catch (failure) {
         error = String(failure.message ?? failure).slice(0, 4_000);
       }
-      // Always show the final UI, including after partial execution or script errors.
-      if (outputBytes > maxOutputBytes - 4 * 1024 * 1024) { output = []; outputBytes = 0; }
-      display(await page.screenshot({ type: 'png', scale: 'css' }));
-      if (error) emit({ type: 'text', text: 'Script error: ' + error });
-      return { output, error };
+      return observation(error, 'Script error', message.includeScreenshot);
     }
+    case 'verify_page':
+      output = [];
+      outputBytes = 0;
+      display(await page.screenshot({ type: 'png', scale: 'css', fullPage: true }));
+      return { output };
     case 'screenshot':
       return (await page.screenshot({ type: 'png', scale: 'css', fullPage: message.fullPage ?? false }))
         .toString('base64');

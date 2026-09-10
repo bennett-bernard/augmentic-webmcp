@@ -24,6 +24,22 @@ const html = `<!doctype html><html lang="en"><title>Demo contact form</title>
     });
   </script></html>`;
 
+const nativeHtml = html.replace('</html>', `<script>
+  document.modelContext.registerTool({
+    name: 'update_contact',
+    description: 'Update the name field without submitting the form.',
+    inputSchema: {
+      type: 'object', properties: { name: { type: 'string' }, note: { type: 'string' } },
+      required: ['name'], additionalProperties: false
+    },
+    execute(input) {
+      if (!input.name) throw new Error('A nonempty name is required.');
+      document.querySelector('[name="name"]').value = input.name;
+      return { updated: true, name: input.name, noteProvided: 'note' in input };
+    }
+  });
+  </script></html>`);
+
 // No API key or outbound network is needed after building the runtime image.
 test.use({ runtimeOffline: true });
 test.beforeEach(async ({ runtime }) => { await runtime.open(url, html); });
@@ -82,7 +98,8 @@ test('exec_js fills and submits a form through the SDK with persistent state and
     },
     async *getStreamedResponse() { throw new Error('Streaming is not used in this test.'); },
   };
-  const result = await runBrowserTask(runtime, 'Fill and submit this pretend form.', { model });
+  const result = await runBrowserTask(runtime, 'Fill and submit this pretend form.', { model, structuredWebMCP: true });
+  expect(runtime.structuredObservations).toBe(false); // No native tools: keep browser observations.
   expect(result.finalOutput).toBe('Done.');
   expect(turn).toBe(3);
   expect(runtime.history.every((entry) => !entry.error)).toBe(true);
@@ -202,4 +219,144 @@ test('Responses API adapter serializes exec_js and original-resolution image res
   });
   expect(result.finalOutput).toBe('Inspected.');
   expect(calls).toBe(2);
+});
+
+test('native WebMCP is exposed through the Responses adapter and updates the visible form', async ({ runtime }) => {
+  await runtime.open(url, nativeHtml);
+  let calls = 0;
+  const client = {
+    responses: {
+      async create(body) {
+        const nativeTool = body.tools.find(item => item.name?.endsWith('_update_contact'));
+        expect(nativeTool).toMatchObject({
+          type: 'function', strict: false,
+          parameters: { type: 'object', required: ['name'], properties: { note: { type: 'string' } } },
+        });
+        if (calls++ === 0) return {
+          id: 'native_1', status: 'completed', output: [{
+            id: 'native_fc', type: 'function_call', call_id: 'native_call',
+            name: nativeTool.name, arguments: JSON.stringify({ name: 'Alex Taylor' }), status: 'completed',
+          }],
+        };
+        const result = body.input.findLast(item => item.type === 'function_call_output');
+        expect(JSON.parse(result.output.find(item => item.type === 'input_text').text)).toEqual({
+          updated: true, name: 'Alex Taylor', noteProvided: false,
+        });
+        expect(result.output.find(item => item.type === 'input_image').detail).toBe('original');
+        return {
+          id: 'native_2', status: 'completed', output: [{
+            id: 'native_msg', type: 'message', role: 'assistant', status: 'completed',
+            content: [{ type: 'output_text', text: 'Updated with WebMCP.', annotations: [] }],
+          }],
+        };
+      },
+    },
+  };
+  const result = await runBrowserTask(runtime, 'Fill in the name without submitting.', {
+    model: new OpenAIResponsesModel(client, 'gpt-6-astra'), requiredWebMCPTool: 'update_contact',
+  });
+  expect(result.finalOutput).toBe('Updated with WebMCP.');
+  expect(calls).toBe(2);
+  expect(runtime.webmcp).toMatchObject({ status: 'ready', nativeAvailable: true });
+  expect(runtime.history).toHaveLength(1);
+  expect(runtime.history[0]).toMatchObject({ type: 'webmcp', name: 'update_contact', input: { name: 'Alex Taylor' } });
+  expect(runtime.history[0].error).toBeUndefined();
+  const visible = await runtime.execute("console.log(await page.locator('[name=name]').inputValue()); console.log(await page.getByRole('status').innerText());");
+  expect(textOutput(visible).trim()).toBe('Alex Taylor');
+});
+
+test('webmcp=off withholds even site-wide native tools and fails an explicit requirement before a model call', async ({ runtime }) => {
+  await runtime.open(url + '?webmcp=off', nativeHtml);
+  const model = { getResponse() { throw new Error('The model must not be called.'); } };
+  await expect(runBrowserTask(runtime, 'Inspect.', { model, requiredWebMCPTool: 'update_contact', structuredWebMCP: true })).rejects.toThrow('unavailable (disabled)');
+  expect(runtime.structuredObservations).toBe(false);
+  expect(runtime.webmcp).toMatchObject({ status: 'disabled', nativeAvailable: true, tools: [] });
+  expect(createBrowserAgent(runtime).tools.map(tool => tool.name)).toEqual(['web_search', 'exec_js']);
+  await expect(runtime.executeWebMCP('update_contact', { name: 'Blocked' })).rejects.toThrow('not exposed');
+  const visible = await runtime.execute("console.log(await page.locator('[name=name]').inputValue());");
+  expect(textOutput(visible)).toBe('');
+});
+
+test('native tool errors return a screenshot, allow correction, and reject calls after page navigation', async ({ runtime }) => {
+  await runtime.open(url, nativeHtml);
+  await runtime.discoverWebMCP();
+  const failed = await runtime.executeWebMCP('update_contact', { name: '' });
+  expect(textOutput(failed)).toContain('WebMCP error:');
+  expectScreenshot(failed);
+  expect(runtime.history[0].error).toBeTruthy();
+  const corrected = await runtime.executeWebMCP('update_contact', { name: 'Corrected' });
+  expect(JSON.parse(textOutput(corrected)).name).toBe('Corrected');
+  await runtime.execute("await page.goto('about:blank');");
+  const stale = await runtime.executeWebMCP('update_contact', { name: 'Stale' });
+  expect(textOutput(stale)).toContain('The page changed');
+});
+
+test('a hung native WebMCP call is killed and its container removed', async ({ runtime }) => {
+  await runtime.open(url, nativeHtml.replace("if (!input.name)", "if (input.name === 'hang') return new Promise(() => {}); if (!input.name)"));
+  await runtime.discoverWebMCP();
+  runtime.executionTimeout = 500;
+  await expect(runtime.executeWebMCP('update_contact', { name: 'hang' })).rejects.toThrow('timed out');
+  await runtime.close();
+  await expect(execFileAsync('docker', ['inspect', runtime.name])).rejects.toThrow();
+  expect(runtime.history[0].error).toContain('timed out');
+});
+
+test('structured WebMCP sends no initial or intermediate images and verifies the final page through the SDK', async ({ runtime }) => {
+  await runtime.open(url, nativeHtml);
+  let calls = 0;
+  const client = { responses: { async create(body) {
+    const nativeTool = body.tools.find(item => item.name?.endsWith('_update_contact'));
+    expect(body.tools.some(item => item.name === 'verify_page')).toBe(true);
+    const turn = calls++;
+    if (turn === 0) {
+      expect(body.input.find(item => item.role === 'user').content.map(item => item.type)).toEqual(['input_text']);
+    } else {
+      const result = body.input.findLast(item => item.type === 'function_call_output');
+      if (turn === 1) {
+        expect(result.output.map(item => item.type)).toEqual(['input_text']);
+        expect(JSON.parse(result.output[0].text).name).toBe('Alex Taylor');
+      } else {
+        expect(result.output.find(item => item.type === 'input_image').image_url).toMatch(/^data:image\/png;base64,iVBOR/);
+      }
+    }
+    return {
+      id: 'structured_' + turn, status: 'completed',
+      output: turn < 2 ? [{
+        id: 'structured_fc_' + turn, type: 'function_call', call_id: 'structured_call_' + turn,
+        name: turn === 0 ? nativeTool.name : 'verify_page',
+        arguments: JSON.stringify(turn === 0 ? { name: 'Alex Taylor' } : {}), status: 'completed',
+      }] : [{
+        id: 'structured_msg', type: 'message', role: 'assistant', status: 'completed',
+        content: [{ type: 'output_text', text: 'Visually verified.', annotations: [] }],
+      }],
+    };
+  } } };
+  const result = await runBrowserTask(runtime, 'Fill the name without submitting.', {
+    model: new OpenAIResponsesModel(client, 'gpt-6-astra'), requiredWebMCPTool: 'update_contact', structuredWebMCP: true,
+  });
+  expect(result.finalOutput).toBe('Visually verified.');
+  expect(calls).toBe(3);
+  expect(runtime.initialImageCount).toBe(0);
+  expect(runtime.history.map(entry => entry.type)).toEqual(['webmcp', 'verify_page']);
+  expect(runtime.history[0].output.every(item => item.type === 'text')).toBe(true);
+  expectScreenshot(runtime.history[1].output);
+});
+
+test('structured observations preserve native and script errors, allow correction, and reset for a new page', async ({ runtime }) => {
+  await runtime.open(url, nativeHtml);
+  await runtime.discoverWebMCP();
+  runtime.structuredObservations = true;
+  const failed = await runtime.executeWebMCP('update_contact', { name: '' });
+  expect(textOutput(failed)).toContain('WebMCP error:');
+  expect(failed.every(item => item.type === 'text')).toBe(true);
+  const scriptError = await runtime.execute("throw new Error('Try again');");
+  expect(textOutput(scriptError)).toContain('Script error: Try again');
+  expect(scriptError.every(item => item.type === 'text')).toBe(true);
+  const corrected = await runtime.execute("await page.locator('[name=name]').fill('Corrected');");
+  expect(textOutput(corrected)).toBe('Action completed.');
+  expect(corrected.every(item => item.type === 'text')).toBe(true);
+  expectScreenshot(await runtime.verifyPage());
+  await runtime.open(url, nativeHtml);
+  expect(runtime.structuredObservations).toBe(false);
+  expectScreenshot(await runtime.execute("console.log(await page.title());"));
 });

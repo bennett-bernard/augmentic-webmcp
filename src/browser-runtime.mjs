@@ -11,6 +11,9 @@ export class BrowserRuntime {
     this.offline = offline;
     this.executionTimeout = executionTimeout;
     this.history = [];
+    this.structuredObservations = false;
+    this.initialImageCount = 0;
+    this.webmcp = { status: 'not-discovered', tools: [] };
     this.name = 'augmentic-browser-' + randomUUID();
     this.pending = new Map();
     this.sequence = 0;
@@ -107,19 +110,50 @@ export class BrowserRuntime {
   }
 
   open(url, html) {
+    this.webmcp = { status: 'not-discovered', tools: [] };
+    this.structuredObservations = false;
+    this.initialImageCount = 0;
     return this.request('open', { url, html }, { timeout: 35_000 });
   }
 
+  async discoverWebMCP({ signal } = {}) {
+    this.webmcp = await this.request('webmcp_discover', {}, { signal });
+    this.webmcp.tools = this.webmcp.tools.map((tool, index) => ({
+      ...tool,
+      // Preserve the native name separately; SDK function names have tighter rules.
+      agentToolName: `webmcp_${index}_${tool.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 45)}`,
+    }));
+    return this.webmcp;
+  }
+
+  async executeWebMCP(name, input, { signal } = {}) {
+    const tool = this.webmcp.tools.find(tool => tool.name === name);
+    if (this.webmcp.status !== 'ready' || !tool) throw new Error('WebMCP tool was not exposed to this agent: ' + name);
+    return this.recordExecution('webmcp_call', {
+      name, input, origin: tool.origin, url: this.webmcp.url, includeScreenshot: !this.structuredObservations,
+    }, { type: 'webmcp', name, input, origin: tool.origin }, signal);
+  }
+
   async execute(code, { signal } = {}) {
-    const entry = { code };
+    return this.recordExecution('execute', { code, includeScreenshot: !this.structuredObservations }, { type: 'exec_js', code }, signal);
+  }
+
+  async verifyPage({ signal } = {}) {
+    return this.recordExecution('verify_page', {}, { type: 'verify_page' }, signal);
+  }
+
+  async recordExecution(method, args, entry, signal) {
     this.history.push(entry);
+    const started = Date.now();
     try {
-      const result = await this.request('execute', { code }, { signal });
+      const result = await this.request(method, args, { signal });
       Object.assign(entry, result);
       return result.output;
     } catch (error) {
       entry.error = error.message;
       throw error;
+    } finally {
+      entry.durationMs = Date.now() - started;
     }
   }
 

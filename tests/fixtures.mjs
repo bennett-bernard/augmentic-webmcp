@@ -26,6 +26,12 @@ export const test = base.extend({
       await use(runtime);
     } finally {
       try {
+        await saveArtifact(testInfo, 'webmcp', {
+          body: JSON.stringify({
+            ...runtime.webmcp,
+            calls: runtime.history.filter(entry => entry.type === 'webmcp').map(({ name, input, error, durationMs }) => ({ name, input, error, durationMs })),
+          }, null, 2), contentType: 'application/json',
+        });
         await saveArtifact(testInfo, 'execution-history', {
           body: JSON.stringify(runtime.history, null, 2), contentType: 'application/json',
         });

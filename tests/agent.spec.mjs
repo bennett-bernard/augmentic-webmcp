@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, saveArtifact } from './fixtures.mjs';
 import { runBrowserTask } from '../src/browser-agent.mjs';
 import { contactForms } from '../scenarios/contact-forms.mjs';
 
@@ -23,19 +23,19 @@ for (const scenario of scenarios) {
       ).toBeTruthy();
     });
 
-    test('agent follows the form prompt', async ({ page }, testInfo) => {
-      await testInfo.attach('scenario', {
+    test('agent follows the form prompt', async ({ runtime }, testInfo) => {
+      await saveArtifact(testInfo, 'scenario', {
         body: JSON.stringify({ url: scenario.url, prompt: scenario.prompt }, null, 2),
         contentType: 'application/json',
       });
-      await page.goto(scenario.url);
-      const result = await runBrowserTask(page, scenario.prompt);
-      await testInfo.attach('agent-history', {
+      await runtime.open(scenario.url);
+      const result = await runBrowserTask(runtime, scenario.prompt);
+      await saveArtifact(testInfo, 'agent-history', {
         body: JSON.stringify(result.history, null, 2),
         contentType: 'application/json',
       });
-      await testInfo.attach('final-page', {
-        body: await page.screenshot({ type: 'png', fullPage: true }),
+      await saveArtifact(testInfo, 'final-page', {
+        body: await runtime.screenshot(true),
         contentType: 'image/png',
       });
       console.log('Agent:', result.finalOutput);
@@ -44,11 +44,8 @@ for (const scenario of scenarios) {
       // Execution checks only. Review the screenshot/transcript for task correctness.
       expect(result.interruptions, 'The agent run paused before finishing.').toHaveLength(0);
       expect(result.finalOutput, 'The agent did not return a final response.').toBeTruthy();
-      const actions = result.rawResponses.flatMap((response) => response.output)
-        .filter((item) => item.type === 'computer_call')
-        .flatMap((call) => call.actions ?? [call.action]);
-      expect(actions.some((action) => ['click', 'double_click', 'type', 'keypress', 'drag'].includes(action?.type)),
-        'The agent finished without interacting with the form.',
+      expect(runtime.history.some((entry) => !entry.error && entry.output?.length),
+        'The agent finished without successfully executing browser code.',
       ).toBe(true);
     });
   });

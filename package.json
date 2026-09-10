@@ -3,14 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Agent tests for live demo contact forms using the OpenAI Agents SDK and Playwright.",
+  "description": "Computer-use form tests with GPT-6 Astra, the Agents SDK, and sandboxed Playwright code execution.",
   "engines": {
     "node": ">=22.9.0"
   },
   "scripts": {
     "test": "node --env-file-if-exists=.env node_modules/@playwright/test/cli.js test agent.spec.mjs",
     "test:smoke": "playwright test smoke.spec.mjs",
-    "browser:install": "playwright install chromium"
+    "sandbox:build": "docker build -f sandbox/Dockerfile -t augmentic-browser-runtime:local ."
   },
   "dependencies": {
     "@openai/agents": "0.17.2",

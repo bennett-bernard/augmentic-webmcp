@@ -1,0 +1,22 @@
+{
+  "name": "augmentic-webmcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent tests for live demo contact forms using the OpenAI Agents SDK and Playwright.",
+  "engines": {
+    "node": ">=22.9.0"
+  },
+  "scripts": {
+    "test": "node --env-file-if-exists=.env node_modules/@playwright/test/cli.js test agent.spec.mjs",
+    "test:smoke": "playwright test smoke.spec.mjs",
+    "browser:install": "playwright install chromium"
+  },
+  "dependencies": {
+    "@openai/agents": "0.17.2",
+    "zod": "4.6.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}
